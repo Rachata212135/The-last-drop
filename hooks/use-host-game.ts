@@ -14,7 +14,7 @@ import {
   startGame as startGameLogic,
   startRound,
 } from '@/lib/game/logic'
-import type { GameState, PlayerAction, Player } from '@/lib/game/types'
+import type { GameState, PlayerAction, Player, GameMode } from '@/lib/game/types'
 
 /**
  * The host is the single source of truth. It owns the authoritative GameState,
@@ -76,11 +76,14 @@ export function useHostGame() {
         case 'request_state':
           if (readyRef.current) roomRef.current?.send('state', { ...s, now: Date.now() })
           return
+        case 'set_mode':
+          if (s.phase === 'lobby') broadcast({ ...s, mode: action.mode })
+          return
         case 'vote': {
           if (s.phase !== 'voting') return
           const voter = s.players.find((p) => p.id === action.playerId)
           if (!voter || voter.role === 'mayor') return
-          if (s.votes[action.playerId]) return // votes are locked once cast
+          if (s.votes[action.playerId]) return
           const next: GameState = {
             ...s,
             votes: { ...s.votes, [action.playerId]: action.choice },
@@ -94,6 +97,86 @@ export function useHostGame() {
           const mayor = s.players.find((p) => p.id === action.playerId)
           if (!mayor || mayor.role !== 'mayor') return
           broadcast(resolveMayor(s, action.target))
+          return
+        }
+        case 'bio_fertilizer': {
+          if (s.factions.farmer.hasUsedFertilizer || s.factions.farmer.crisis === 0) return
+          broadcast({
+            ...s,
+            factions: {
+              ...s.factions,
+              farmer: {
+                ...s.factions.farmer,
+                hasUsedFertilizer: true,
+                crisis: Math.max(0, s.factions.farmer.crisis - 1),
+              },
+            },
+          })
+          return
+        }
+        case 'backup_factory': {
+          if (s.factions.industry.hasUsedBackup) return
+          broadcast({
+            ...s,
+            waterTokens: s.waterTokens + 2,
+            factions: {
+              ...s.factions,
+              industry: {
+                ...s.factions.industry,
+                hasUsedBackup: true,
+                crisis: s.factions.industry.crisis + 1,
+              },
+            },
+          })
+          return
+        }
+        case 'protest': {
+          if (s.factions.citizen.hasProtested) return
+          broadcast({
+            ...s,
+            factions: {
+              ...s.factions,
+              citizen: {
+                ...s.factions.citizen,
+                hasProtested: true,
+              },
+            },
+          })
+          return
+        }
+        case 'revote': {
+          if (s.phase !== 'voting' || s.factions.citizen.hasRevoted) return
+          broadcast({
+            ...s,
+            votes: {}, // reset all votes
+            timerEnds: Date.now() + 15 * 1000, // reset timer
+            factions: {
+              ...s.factions,
+              citizen: {
+                ...s.factions.citizen,
+                hasRevoted: true,
+              },
+            },
+          })
+          return
+        }
+        case 'veto': {
+          if (s.phase !== 'event_reveal' || s.hasUsedVeto || !s.currentEvent) return
+          broadcast({
+            ...s,
+            hasUsedVeto: true,
+            vetoedEvent: true,
+            waterTokens: s.waterTokens + s.currentEvent.cost, // refund the water cost
+          })
+          return
+        }
+        case 'martial_law': {
+          if (s.hasUsedMartialLaw) return
+          broadcast({
+            ...s,
+            hasUsedMartialLaw: true,
+            martialLawActive: true,
+          })
           return
         }
       }
@@ -148,10 +231,10 @@ export function useHostGame() {
     }
   }, [state, broadcast])
 
-  const startGame = useCallback(() => {
+  const startGame = useCallback((mode: GameMode = 'standard') => {
     const s = stateRef.current
     if (!s || s.phase !== 'lobby') return
-    broadcast(startGameLogic(s))
+    broadcast(startGameLogic(s, mode))
   }, [broadcast])
 
   const continueFromResult = useCallback(() => {
